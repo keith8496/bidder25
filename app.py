@@ -14,16 +14,26 @@ from flask_socketio import SocketIO
 
 
 LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
+log_handlers = [logging.StreamHandler()]
+try:
+    # Try to create a logs directory and attach a file handler for persistent logs.
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_handlers.append(logging.FileHandler(LOG_DIR / "app.log"))
+except Exception as e:
+    # In read-only or constrained environments, fall back to console-only logging.
+    print(f"Warning: could not initialize file logging in {LOG_DIR}: {e}")
+
 logging.basicConfig(
     level=logging.WARN,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(LOG_DIR / "app.log"),
-    ],
+    handlers=log_handlers,
 )
 logger = logging.getLogger("auction")
+# Explicitly document at runtime that this app assumes a single-process, in-memory state model.
+logger.warning(
+    "bidder25 running with in-memory state and a single-process Socket.IO server; "
+    "do NOT deploy with multiple workers/processes without adding a shared state backend."
+)
 
 
 def _now() -> datetime:
@@ -240,13 +250,37 @@ def table_rows(snapshot):
 
 
 def tract_options():
-    return [{"label": name, "value": name} for name in TRACTS.keys()]
+    with STATE_LOCK:
+        return [{"label": name, "value": name} for name in TRACTS.keys()]
 
+
+
+# Helper for safe percent-of-budget calculation
+def safe_pct_of_budget(current_bid: float, max_budget: float) -> float:
+    """
+    Compute % of budget used, with validation and clamping.
+    - If max_budget is None or <= 0, return 0.0 to avoid division errors.
+    - Clamp the result between 0.0 and 150.0.
+    """
+    try:
+        if max_budget is None or max_budget <= 0:
+            return 0.0
+        pct = (current_bid / max_budget) * 100.0
+    except Exception:
+        logger.exception("Error computing pct_of_budget for current_bid=%r max_budget=%r", current_bid, max_budget)
+        return 0.0
+    # Clamp and round to one decimal place
+    pct = round(pct, 1)
+    if pct < 0.0:
+        pct = 0.0
+    if pct > 150.0:
+        pct = 150.0
+    return pct
 
 def build_budget_progress(snapshot):
     names = list(snapshot.keys())
     pct_to_budget = [
-        min(round((data["current_bid"] / data["max_budget"]) * 100, 1), 150) for data in snapshot.values()
+        safe_pct_of_budget(data["current_bid"], data["max_budget"]) for data in snapshot.values()
     ]
     fig = go.Figure(
         go.Bar(
@@ -370,6 +404,9 @@ def view_only_layout(pathname: str):
 
 
 def monitor_layout(pathname: str):
+    with STATE_LOCK:
+        tract_names = list(TRACTS.keys())
+    default_tract = tract_names[0] if tract_names else None
     return html.Div(
         [
             navigation(pathname),
@@ -378,7 +415,12 @@ def monitor_layout(pathname: str):
             html.Div(
                 [
                     html.Label("Tract"),
-                    dcc.Dropdown(id="monitor-tract", options=tract_options(), value=list(TRACTS.keys())[0], clearable=False),
+                    dcc.Dropdown(
+                        id="monitor-tract",
+                        options=tract_options(),
+                        value=default_tract,
+                        clearable=False,
+                    ),
                 ],
                 style={"marginBottom": "12px"},
             ),
@@ -459,12 +501,20 @@ def monitor_layout(pathname: str):
 
 
 def bidder_layout(pathname: str):
+    with STATE_LOCK:
+        tract_names = list(TRACTS.keys())
+    default_tract = tract_names[0] if tract_names else None
     return html.Div(
         [
             navigation(pathname),
             html.H2("Bidder"),
             html.P("Choose a tract to see its current asking price and approval status."),
-            dcc.Dropdown(id="bidder-tract", options=tract_options(), value=list(TRACTS.keys())[0], clearable=False),
+            dcc.Dropdown(
+                id="bidder-tract",
+                options=tract_options(),
+                value=default_tract,
+                clearable=False,
+            ),
             html.Div(
                 [
                     html.Div(["Current bid: ", html.Span(id="bidder-current-bid")]),
@@ -1047,6 +1097,8 @@ def handle_admin_actions(reset_clicks, add_clicks, _ts, name, bid, max_budget, r
             max_val = float(max_budget) if max_budget is not None else 0.0
         except (TypeError, ValueError):
             return dash.no_update, "Bid and max must be numbers.", {"color": "crimson"}
+        if max_val <= 0:
+            return dash.no_update, "Max budget must be greater than zero.", {"color": "crimson"}
         created = add_tract(name, bid_val, max_val)
         if not created:
             return dash.no_update, "Tract already exists or name invalid.", {"color": "crimson"}
@@ -1054,6 +1106,24 @@ def handle_admin_actions(reset_clicks, add_clicks, _ts, name, bid, max_budget, r
         return table_rows(snapshot), f"Added tract {name}.", {"color": "seagreen"}
 
     if trig == "admin-table":
+        # Validate that all max_budget values are > 0 before applying updates
+        invalid_tracts = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("tract")
+            try:
+                max_val = float(row.get("max_budget")) if row.get("max_budget") is not None else None
+            except (TypeError, ValueError):
+                # Non-numeric will be handled by apply_table_updates' own checks
+                continue
+            if max_val is None or max_val <= 0:
+                if name:
+                    invalid_tracts.append(name)
+        if invalid_tracts:
+            msg = "Max budget must be greater than zero for: " + ", ".join(invalid_tracts) + "."
+            return dash.no_update, msg, {"color": "crimson"}
+
         apply_table_updates(rows)
         snapshot = snapshot_state()
         return table_rows(snapshot), "Table changes saved.", {"color": "seagreen"}
