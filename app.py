@@ -16,7 +16,7 @@ from flask_socketio import SocketIO
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARN,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
@@ -37,6 +37,7 @@ INITIAL_STATE: Dict[str, Dict[str, Any]] = {
         "max_budget": 150_000.00,
         "approved_over_budget": False,
         "requested_budget": None,
+        "requested_unit": None,
         "high_bidder": False,
         "last_updated": _now(),
     },
@@ -45,6 +46,7 @@ INITIAL_STATE: Dict[str, Dict[str, Any]] = {
         "max_budget": 200_000.00,
         "approved_over_budget": False,
         "requested_budget": None,
+        "requested_unit": None,
         "high_bidder": False,
         "last_updated": _now(),
     },
@@ -53,6 +55,7 @@ INITIAL_STATE: Dict[str, Dict[str, Any]] = {
         "max_budget": 110_000.00,
         "approved_over_budget": False,
         "requested_budget": None,
+        "requested_unit": None,
         "high_bidder": False,
         "last_updated": _now(),
     },
@@ -88,6 +91,7 @@ def snapshot_state() -> Dict[str, Dict[str, Any]]:
                 "max_budget": data["max_budget"],
                 "approved_over_budget": data["approved_over_budget"],
                 "requested_budget": data.get("requested_budget"),
+                "requested_unit": data.get("requested_unit"),
                 "high_bidder": data.get("high_bidder", False),
                 "last_updated": data["last_updated"].isoformat(),
             }
@@ -132,6 +136,7 @@ def approve_over_budget(tract: str, new_budget: float = None) -> None:
                 TRACTS[tract]["max_budget"] = new_budget
             TRACTS[tract]["approved_over_budget"] = True
             TRACTS[tract]["requested_budget"] = None
+            TRACTS[tract]["requested_unit"] = None
             logger.info(
                 "Approved budget for %s: max_budget=%.2f",
                 tract,
@@ -143,14 +148,16 @@ def approve_over_budget(tract: str, new_budget: float = None) -> None:
     broadcast_snapshot()
 
 
-def request_budget_increase(tract: str, amount: float) -> None:
+from typing import Optional
+def request_budget_increase(tract: str, amount: float, unit: Optional[str] = None) -> None:
     with STATE_LOCK:
         if tract not in TRACTS:
             logger.warning("Request for unknown tract %s", tract)
             return
         TRACTS[tract]["requested_budget"] = amount
+        TRACTS[tract]["requested_unit"] = unit
         TRACTS[tract]["approved_over_budget"] = False
-        logger.info("Requested budget increase for %s to %.2f", tract, amount)
+        logger.info("Requested budget increase for %s to %.2f (%s)", tract, amount, unit)
     # State changed; broadcast updated snapshot
     broadcast_snapshot()
 
@@ -196,6 +203,8 @@ def apply_table_updates(rows: Any) -> None:
             TRACTS[name]["last_updated"] = _now()
             TRACTS[name]["approved_over_budget"] = False
             TRACTS[name]["requested_budget"] = None
+            TRACTS[name]["requested_unit"] = None
+            TRACTS[name]["high_bidder"] = False
             logger.info("Admin table update for %s: bid=%.2f, max=%.2f", name, bid, budget)
     # State changed; broadcast updated snapshot
     broadcast_snapshot()
@@ -213,6 +222,7 @@ def add_tract(name: str, current_bid: float, max_budget: float) -> bool:
             "max_budget": max_budget,
             "approved_over_budget": False,
             "requested_budget": None,
+            "requested_unit": None,
             "high_bidder": False,
             "last_updated": _now(),
         }
@@ -410,7 +420,7 @@ def monitor_layout(pathname: str):
                             {"label": "K", "value": "K"},
                             {"label": "MM", "value": "MM"},
                         ],
-                        value="1",
+                        value="K",
                         inline=True,
                         labelStyle={"marginRight": "10px"},
                         inputStyle={"marginRight": "4px"},
@@ -442,6 +452,8 @@ def monitor_layout(pathname: str):
             ),
             html.Div(id="monitor-feedback", style={"fontWeight": "bold", "marginBottom": "4px"}),
             html.Div(id="monitor-high-feedback", style={"marginBottom": "12px"}),
+            dcc.Store(id="monitor-focus-signal"),
+            html.Div(id="monitor-focus-anchor", style={"display": "none"}),
         ]
     )
 
@@ -484,25 +496,35 @@ def bidder_layout(pathname: str):
             html.Div(
                 [
                     html.Label("Request higher budget"),
-                    dcc.Input(
-                        id="bidder-request-amount",
-                        type="number",
-                        step="0.01",
-                        placeholder="Enter desired max budget",
-                        style={"width": "220px", "marginRight": "8px"},
-                    ),
-                    dcc.RadioItems(
-                        id="bidder-unit",
-                        options=[
-                            {"label": "Exact", "value": "1"},
-                            {"label": "K", "value": "K"},
-                            {"label": "MM", "value": "MM"},
+                    html.Div(
+                        [
+                            dcc.RadioItems(
+                                id="bidder-unit",
+                                options=[
+                                    {"label": "Exact", "value": "1"},
+                                    {"label": "K", "value": "K"},
+                                    {"label": "MM", "value": "MM"},
+                                ],
+                                value="K",
+                                inline=True,
+                                style={"marginRight": "16px"},
+                            ),
+                            dcc.Input(
+                                id="bidder-request-amount",
+                                type="number",
+                                step="0.01",
+                                placeholder="Enter desired max budget",
+                                style={"width": "220px"},
+                            ),
                         ],
-                        value="1",
-                        inline=True,
-                        style={"marginTop": "6px"},
+                        style={
+                            "display": "flex",
+                            "alignItems": "center",
+                            "flexWrap": "wrap",
+                            "gap": "8px",
+                            "marginTop": "6px",
+                        },
                     ),
-                    html.Button("Submit request", id="bidder-request-btn", n_clicks=0),
                     html.Div(id="bidder-request-feedback", style={"marginTop": "6px", "fontWeight": "bold"}),
                 ],
                 style={"marginTop": "14px"},
@@ -524,23 +546,29 @@ def approver_layout(pathname: str):
                         [
                             html.Div(tract, style={"fontWeight": "bold"}),
                             html.Div(id={"type": "approver-row", "tract": tract}, style={"marginBottom": "6px"}),
-                            dcc.Input(
-                                id={"type": "approver-input", "tract": tract},
-                                type="number",
-                                step="0.01",
-                                style={"width": "200px", "marginRight": "8px"},
-                                placeholder="Requested/new budget",
-                            ),
-                            dcc.RadioItems(
-                                id={"type": "approver-unit", "tract": tract},
-                                options=[
-                                    {"label": "Exact", "value": "1"},
-                                    {"label": "K", "value": "K"},
-                                    {"label": "MM", "value": "MM"},
+                            # Unit selector above input, both stacked vertically
+                            html.Div(
+                                [
+                                    dcc.RadioItems(
+                                        id={"type": "approver-unit", "tract": tract},
+                                        options=[
+                                            {"label": "Exact", "value": "1"},
+                                            {"label": "K", "value": "K"},
+                                            {"label": "MM", "value": "MM"},
+                                        ],
+                                        value="K",
+                                        inline=True,
+                                        style={"marginBottom": "6px"},
+                                    ),
+                                    dcc.Input(
+                                        id={"type": "approver-input", "tract": tract},
+                                        type="number",
+                                        step="0.01",
+                                        style={"width": "200px", "marginRight": "8px"},
+                                        placeholder="Requested/new budget",
+                                    ),
                                 ],
-                                value="1",
-                                inline=True,
-                                style={"marginBottom": "6px"},
+                                style={"display": "flex", "flexDirection": "column", "alignItems": "flex-start", "marginBottom": "6px"},
                             ),
                             html.Button(
                                 f"Approve over budget for {tract}",
@@ -821,21 +849,22 @@ def handle_monitor_submit(n_submit, tract: str, raw_amount, unit):
 
 @app.callback(
     Output("monitor-high-feedback", "children"),
+    Output("monitor-focus-signal", "data"),
     Input("monitor-high-toggle", "value"),
     State("monitor-tract", "value"),
     prevent_initial_call=True,
 )
 def handle_monitor_high_toggle(values, tract):
     if not tract:
-        return "Select a tract first."
+        return "Select a tract first.", None
     is_high = "high" in (values or [])
     # Check current state to avoid redundant updates when the checkbox
     # is changed programmatically (e.g., due to another client).
     info = snapshot_state().get(tract)
     if info is not None and bool(info.get("high_bidder")) == is_high:
-        return f"High bidder status is already {'YES' if is_high else 'NO'} for {tract}."
+        return f"High bidder status is already {'YES' if is_high else 'NO'} for {tract}.", None
     set_high_bidder(tract, is_high)
-    return f"High bidder status set to {'YES' if is_high else 'NO'} for {tract}."
+    return f"High bidder status set to {'YES' if is_high else 'NO'} for {tract}.", _now().isoformat()
 
 
 @app.callback(
@@ -893,23 +922,22 @@ app.clientside_callback(
 @app.callback(
     Output("bidder-request-feedback", "children"),
     Output("bidder-request-feedback", "style"),
-    Input("bidder-request-btn", "n_clicks"),
+    Output("bidder-request-amount", "value"),
+    Input("bidder-request-amount", "n_submit"),
     State("bidder-tract", "value"),
     State("bidder-request-amount", "value"),
     State("bidder-unit", "value"),
     prevent_initial_call=True,
 )
-def handle_bidder_request(n_clicks, tract, amount, unit):
-    if not n_clicks:
-        return dash.no_update, dash.no_update
+def handle_bidder_request(n_submit, tract, amount, unit):
     if not tract:
-        return "Select a tract first.", {"color": "crimson"}
+        return "Select a tract first.", {"color": "crimson"}, dash.no_update
     try:
         req_amount = float(amount) * unit_multiplier(unit)
     except (TypeError, ValueError):
-        return "Enter a numeric requested budget.", {"color": "crimson"}
-    request_budget_increase(tract, req_amount)
-    return f"Requested budget of {currency(req_amount)} for {tract}.", {"color": "seagreen"}
+        return "Enter a numeric requested budget.", {"color": "crimson"}, dash.no_update
+    request_budget_increase(tract, req_amount, unit)
+    return f"Requested budget of {currency(req_amount)} for {tract}.", {"color": "seagreen"}, ""
 
 
 @app.callback(
@@ -917,6 +945,7 @@ def handle_bidder_request(n_clicks, tract, amount, unit):
     Output({"type": "approve-button", "tract": MATCH}, "children"),
     Output({"type": "approve-button", "tract": MATCH}, "disabled"),
     Output({"type": "approver-input", "tract": MATCH}, "value"),
+    Output({"type": "approver-unit", "tract": MATCH}, "value"),
     Input({"type": "approve-button", "tract": MATCH}, "n_clicks"),
     Input("snapshot-store", "data"),
     State({"type": "approve-button", "tract": MATCH}, "id"),
@@ -929,7 +958,7 @@ def update_single_approver(n_clicks, _snapshot, btn_id, input_value, unit_value)
     snapshot = _snapshot or {}
     info = snapshot.get(tract)
     if not info:
-        return "Unknown tract.", "Approve", True, dash.no_update
+        return "Unknown tract.", "Approve", True, dash.no_update, dash.no_update
     ctx = dash.callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
     if isinstance(ctx.triggered_id, dict) and ctx.triggered_id.get("tract") == tract and n_clicks:
@@ -938,6 +967,7 @@ def update_single_approver(n_clicks, _snapshot, btn_id, input_value, unit_value)
         except (TypeError, ValueError):
             new_budget = None
         if new_budget is not None:
+            # Use the unit that is currently selected (unit_value)
             new_budget *= unit_multiplier(unit_value)
         if info["current_bid"] > info["max_budget"] or (info.get("requested_budget") and new_budget):
             approve_over_budget(tract, new_budget)
@@ -956,8 +986,17 @@ def update_single_approver(n_clicks, _snapshot, btn_id, input_value, unit_value)
         row_text += "Over budget — needs approval"
     else:
         row_text += "Within budget"
+    # Determine which unit to use for display: requested_unit (from bidder) or current unit_value
+    current_unit = unit_value or "K"
+    requested_unit = info.get("requested_unit")
+    effective_unit = requested_unit or current_unit
     input_val = requested if requested is not None else info["max_budget"]
-    return row_text, button_label, disabled, input_val
+    # Show the default budget value in the effective unit (1, K, MM)
+    if input_val is not None:
+        factor = unit_multiplier(effective_unit)
+        if factor:  # avoid division by zero just in case
+            input_val = round(input_val / factor, 2)
+    return row_text, button_label, disabled, input_val, effective_unit
 
 
 @app.callback(
@@ -1021,6 +1060,27 @@ def handle_admin_actions(reset_clicks, add_clicks, _ts, name, bid, max_budget, r
 
     return dash.no_update, dash.no_update, dash.no_update
 
+
+app.clientside_callback(
+    """
+    function(signal) {
+        if (!signal) {
+            return "";
+        }
+        const el = document.getElementById("monitor-price");
+        if (el && typeof el.focus === "function") {
+            el.focus();
+            if (typeof el.select === "function") {
+                el.select();
+            }
+        }
+        // Return some dummy content for the hidden div.
+        return "";
+    }
+    """,
+    Output("monitor-focus-anchor", "children"),
+    Input("monitor-focus-signal", "data"),
+)
 
 if __name__ == "__main__":
     debug = os.getenv("DASH_DEBUG", "1") not in {"0", "false", "False"}
