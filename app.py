@@ -65,8 +65,8 @@ app = Dash(__name__, update_title=None)
 app.title = "Auction Control"
 app.suppress_callback_exceptions = True
 server = app.server
-# Socket.IO for real-time push of state snapshots (same-origin, no special CORS needed)
-socketio = SocketIO(server)
+# Socket.IO for real-time push of state snapshots (development: allow all origins)
+socketio = SocketIO(server, cors_allowed_origins="*")
 
 
 def currency(value: float) -> str:
@@ -656,7 +656,7 @@ app.layout = html.Div(
     [
         dcc.Location(id="url"),
         html.H1("Auction Bidding Control Center"),
-        dcc.Store(id="snapshot-store"),
+        dcc.Store(id="snapshot-store", data=snapshot_state()),
         dcc.Interval(id="state-interval", interval=500, n_intervals=0),
         html.Div(id="page-container"),
     ],
@@ -734,21 +734,14 @@ def render_page(pathname: str):
 
 
 
-# Sync snapshot-store from window.latestSnapshot via clientside callback.
-app.clientside_callback(
-    """
-    function(n, current) {
-        // Use the most recent snapshot pushed over Socket.IO if available.
-        if (typeof window === "undefined" || !window.latestSnapshot) {
-            return current || null;
-        }
-        return window.latestSnapshot;
-    }
-    """,
+
+# Poll the server for the latest snapshot on a fixed interval.
+@app.callback(
     Output("snapshot-store", "data"),
     Input("state-interval", "n_intervals"),
-    State("snapshot-store", "data"),
 )
+def update_snapshot_store(_tick):
+    return snapshot_state()
 
 
 @app.callback(
@@ -1021,4 +1014,6 @@ def handle_admin_actions(reset_clicks, add_clicks, _ts, name, bid, max_budget, r
 if __name__ == "__main__":
     debug = os.getenv("DASH_DEBUG", "1") not in {"0", "false", "False"}
     # Use Socket.IO's runner so WebSocket transport is enabled.
-    socketio.run(server, debug=debug)
+    # Default to port 8050 so it matches the typical Dash dev port, but allow override via PORT env.
+    port = int(os.getenv("PORT", "8050"))
+    socketio.run(server, debug=debug, port=port, use_reloader=False)
