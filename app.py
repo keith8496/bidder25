@@ -86,7 +86,7 @@ def snapshot_state() -> Dict[str, Dict[str, Any]]:
                 "approved_over_budget": data["approved_over_budget"],
                 "requested_budget": data.get("requested_budget"),
                 "high_bidder": data.get("high_bidder", False),
-                "last_updated": data["last_updated"],
+                "last_updated": data["last_updated"].isoformat(),
             }
             for tract, data in TRACTS.items()
         }
@@ -311,7 +311,6 @@ def navigation(pathname: str):
 
 
 def view_only_layout(pathname: str):
-    snapshot = snapshot_state()
     return html.Div(
         [
             navigation(pathname),
@@ -319,16 +318,15 @@ def view_only_layout(pathname: str):
             html.P("Live snapshot of bids by tract."),
             html.Div(
                 [
-                    html.Div(build_summary_table(snapshot), id="view-table", style={"flex": "1"}),
-                    dcc.Graph(id="budget-progress", figure=build_budget_progress(snapshot), style={"flex": "1"}),
+                    html.Div(id="view-table", style={"flex": "1"}),
+                    dcc.Graph(id="budget-progress", style={"flex": "1"}),
                 ],
                 style={"display": "flex", "gap": "16px", "flexWrap": "wrap"},
             ),
             html.Div(
-                dcc.Graph(id="bid-bar", figure=build_bid_bar(snapshot)),
+                dcc.Graph(id="bid-bar"),
                 style={"marginTop": "20px"},
             ),
-            dcc.Interval(id="view-interval", interval=2_000, n_intervals=0),
         ]
     )
 
@@ -347,6 +345,34 @@ def monitor_layout(pathname: str):
                 style={"marginBottom": "12px"},
             ),
             html.Div(id="monitor-stats", style={"marginBottom": "12px"}),
+            html.Div(
+                [
+                    html.Div(["Current bid: ", html.Span(id="monitor-current-bid")]),
+                    html.Div(["Max budget: ", html.Span(id="monitor-max-budget")]),
+                    html.Div(["Requested budget: ", html.Span(id="monitor-requested")]),
+                    html.Div(["Last updated: ", html.Span(id="monitor-last-updated")]),
+                    html.Div(
+                        [
+                            html.Span("Status: ", style={"marginRight": "6px"}),
+                            html.Span(
+                                "",
+                                id="monitor-status-dot",
+                                style={
+                                    "display": "inline-block",
+                                    "width": "12px",
+                                    "height": "12px",
+                                    "borderRadius": "50%",
+                                    "backgroundColor": "gray",
+                                    "marginRight": "6px",
+                                },
+                            ),
+                            html.Span(id="monitor-status-text"),
+                        ]
+                    ),
+                    html.Div(["High bidder: ", html.Span(id="monitor-high-text")]),
+                ],
+                style={"marginBottom": "12px"},
+            ),
             html.Div(
                 [
                     dcc.RadioItems(
@@ -389,7 +415,6 @@ def monitor_layout(pathname: str):
             dcc.Store(id="monitor-focus-store"),
             html.Div(id="monitor-feedback", style={"fontWeight": "bold", "marginBottom": "4px"}),
             html.Div(id="monitor-high-feedback", style={"marginBottom": "12px"}),
-            dcc.Interval(id="monitor-interval", interval=2_000, n_intervals=0),
         ]
     )
 
@@ -401,7 +426,34 @@ def bidder_layout(pathname: str):
             html.H2("Bidder"),
             html.P("Choose a tract to see its current asking price and approval status."),
             dcc.Dropdown(id="bidder-tract", options=tract_options(), value=list(TRACTS.keys())[0], clearable=False),
-            html.Div(id="bidder-info", style={"marginTop": "16px"}),
+            html.Div(
+                [
+                    html.Div(["Current bid: ", html.Span(id="bidder-current-bid")]),
+                    html.Div(["Max budget: ", html.Span(id="bidder-max-budget")]),
+                    html.Div(["Requested budget: ", html.Span(id="bidder-requested")]),
+                    html.Div(["Time since last update: ", html.Span(id="bidder-elapsed")]),
+                    html.Div(
+                        [
+                            html.Span("Approval indicator: ", style={"marginRight": "8px"}),
+                            html.Span(
+                                "",
+                                id="bidder-status-dot",
+                                style={
+                                    "display": "inline-block",
+                                    "width": "12px",
+                                    "height": "12px",
+                                    "borderRadius": "50%",
+                                    "backgroundColor": "gray",
+                                    "marginRight": "6px",
+                                },
+                            ),
+                            html.Span(id="bidder-status-text"),
+                        ]
+                    ),
+                ],
+                id="bidder-info",
+                style={"marginTop": "16px"},
+            ),
             html.Div(
                 [
                     html.Label("Request higher budget"),
@@ -428,7 +480,6 @@ def bidder_layout(pathname: str):
                 ],
                 style={"marginTop": "14px"},
             ),
-            dcc.Interval(id="bidder-interval", interval=1_000, n_intervals=0),
         ]
     )
 
@@ -478,7 +529,6 @@ def approver_layout(pathname: str):
                 style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(240px, 1fr))", "gap": "12px"},
             ),
             html.Div(id="approver-status", style={"marginTop": "12px", "fontWeight": "bold"}),
-            dcc.Interval(id="approver-interval", interval=1_500, n_intervals=0),
         ]
     )
 
@@ -579,6 +629,8 @@ app.layout = html.Div(
     [
         dcc.Location(id="url"),
         html.H1("Auction Bidding Control Center"),
+        dcc.Store(id="snapshot-store"),
+        dcc.Interval(id="state-interval", interval=500, n_intervals=0),
         html.Div(id="page-container"),
     ],
     style={"maxWidth": "1100px", "margin": "0 auto", "padding": "18px"},
@@ -612,58 +664,60 @@ def render_page(pathname: str):
 
 
 @app.callback(
-    Output("view-table", "children"),
-    Output("budget-progress", "figure"),
-    Output("bid-bar", "figure"),
-    Input("view-interval", "n_intervals"),
+    Output("snapshot-store", "data"),
+    Input("state-interval", "n_intervals"),
 )
-def refresh_view_only(_tick):
-    snapshot = snapshot_state()
-    return build_summary_table(snapshot), build_budget_progress(snapshot), build_bid_bar(snapshot)
+def update_snapshot_store(_tick):
+    return snapshot_state()
 
 
 @app.callback(
-    Output("monitor-stats", "children"),
-    Input("monitor-tract", "value"),
-    Input("monitor-interval", "n_intervals"),
+    Output("view-table", "children"),
+    Output("budget-progress", "figure"),
+    Output("bid-bar", "figure"),
+    Input("snapshot-store", "data"),
 )
-def refresh_monitor_stats(tract: str, _tick):
-    if not tract:
-        return "Select a tract to see details."
-    snapshot = snapshot_state()
-    info = snapshot.get(tract)
-    if not info:
-        return "Unknown tract."
-    over_budget = info["current_bid"] > info["max_budget"]
-    approved = info["approved_over_budget"]
-    color = "seagreen" if over_budget and approved else "crimson" if over_budget else "gray"
-    status_label = "Over budget — approved" if over_budget and approved else "Over budget" if over_budget else "Within budget"
-    return html.Div(
-        [
-            html.Div(f"Current bid: {currency(info['current_bid'])}"),
-            html.Div(f"Max budget: {currency(info['max_budget'])}"),
-            html.Div(f"Requested budget: {currency(info['requested_budget'])}" if info.get("requested_budget") else "Requested budget: None"),
-            html.Div(f"Last updated: {info['last_updated'].strftime('%H:%M:%S %Z')}"),
-            html.Div(
-                [
-                    html.Span("Status:", style={"marginRight": "6px"}),
-                    html.Span(
-                        "",
-                        style={
-                            "display": "inline-block",
-                            "width": "12px",
-                            "height": "12px",
-                            "borderRadius": "50%",
-                            "backgroundColor": color,
-                            "marginRight": "6px",
-                        },
-                    ),
-                    html.Span(status_label),
-                ]
-            ),
-            html.Div(f"High bidder: {'Yes' if info.get('high_bidder') else 'No'}"),
-        ]
-    )
+def refresh_view_only(snapshot):
+    if not snapshot:
+        return dash.no_update, dash.no_update, dash.no_update
+    return build_summary_table(snapshot), build_budget_progress(snapshot), build_bid_bar(snapshot)
+
+
+clientside_callback(
+    """
+    function(snapshot, tract) {
+        if (!snapshot || !tract || !snapshot[tract]) {
+            return ["—", "—", "—", "—", "Unknown", {backgroundColor: "gray"}, "Unknown"];
+        }
+        const info = snapshot[tract];
+        const fmt = (v) => "$" + (v || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        const over = info.current_bid > info.max_budget;
+        const approved = info.approved_over_budget;
+        const color = over ? (approved ? "seagreen" : "crimson") : "gray";
+        const status = over ? (approved ? "Over budget — approved" : "Over budget") : "Within budget";
+        const req = info.requested_budget ? fmt(info.requested_budget) : "None";
+        const last = info.last_updated ? new Date(info.last_updated).toLocaleTimeString() : "—";
+        return [
+            fmt(info.current_bid),
+            fmt(info.max_budget),
+            req,
+            last,
+            status,
+            {backgroundColor: color, display: "inline-block", width: "12px", height: "12px", borderRadius: "50%", marginRight: "6px"},
+            info.high_bidder ? "Yes" : "No",
+        ];
+    }
+    """,
+    Output("monitor-current-bid", "children"),
+    Output("monitor-max-budget", "children"),
+    Output("monitor-requested", "children"),
+    Output("monitor-last-updated", "children"),
+    Output("monitor-status-text", "children"),
+    Output("monitor-status-dot", "style"),
+    Output("monitor-high-text", "children"),
+    Input("snapshot-store", "data"),
+    Input("monitor-tract", "value"),
+)
 
 
 @app.callback(
@@ -704,19 +758,7 @@ def handle_monitor_high_toggle(values, tract):
     return f"High bidder status set to {'YES' if is_high else 'NO'} for {tract}."
 
 
-@app.callback(
-    Output("monitor-high-toggle", "value"),
-    Input("monitor-tract", "value"),
-    Input("monitor-interval", "n_intervals"),
-)
-def sync_monitor_toggle(tract, _tick):
-    if not tract:
-        return []
-    info = snapshot_state().get(tract)
-    return ["high"] if info and info.get("high_bidder") else []
-
-
-app.clientside_callback(
+clientside_callback(
     """
     function(_value) {
         const el = document.getElementById("monitor-price");
@@ -731,50 +773,56 @@ app.clientside_callback(
     Input("monitor-high-toggle", "value"),
 )
 
-
-@app.callback(
-    Output("bidder-info", "children"),
-    Input("bidder-tract", "value"),
-    Input("bidder-interval", "n_intervals"),
+clientside_callback(
+    """
+    function(snapshot, tract) {
+        if (!snapshot || !tract || !snapshot[tract]) {
+            return [];
+        }
+        return snapshot[tract].high_bidder ? ["high"] : [];
+    }
+    """,
+    Output("monitor-high-toggle", "value"),
+    Input("snapshot-store", "data"),
+    Input("monitor-tract", "value"),
 )
-def refresh_bidder(tract: str, _tick):
-    if not tract:
-        return "Select a tract."
-    snapshot = snapshot_state()
-    info = snapshot.get(tract)
-    if not info:
-        return "Unknown tract."
-    over_budget = info["current_bid"] > info["max_budget"]
-    delta_seconds = int((_now() - info["last_updated"]).total_seconds())
-    approved = info["approved_over_budget"]
-    color = "seagreen" if over_budget and approved else "crimson" if over_budget else "gray"
-    status_label = "Over budget — approved" if over_budget and approved else "Over budget" if over_budget else "Within budget"
-    requested = info.get("requested_budget")
-    return html.Div(
-        [
-            html.Div(f"Current bid: {currency(info['current_bid'])}"),
-            html.Div(f"Max budget: {currency(info['max_budget'])}"),
-            html.Div(f"Requested budget: {currency(requested)}" if requested else "Requested budget: None"),
-            html.Div(f"Time since last update: {seconds_to_hms(delta_seconds)}"),
-            html.Div(
-                [
-                    html.Span("Approval indicator:", style={"marginRight": "8px"}),
-                    html.Span(
-                        "",
-                        style={
-                            "display": "inline-block",
-                            "width": "12px",
-                            "height": "12px",
-                            "borderRadius": "50%",
-                            "backgroundColor": color,
-                            "marginRight": "6px",
-                        },
-                    ),
-                    html.Span(status_label),
-                ]
-            ),
-        ]
-    )
+
+
+clientside_callback(
+    """
+    function(snapshot, tract) {
+        if (!snapshot || !tract || !snapshot[tract]) {
+            return ["—", "—", "None", "00:00:00", "Unknown", {backgroundColor: "gray"}];
+        }
+        const info = snapshot[tract];
+        const fmt = (v) => "$" + (v || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        const over = info.current_bid > info.max_budget;
+        const approved = info.approved_over_budget;
+        const color = over ? (approved ? "seagreen" : "crimson") : "gray";
+        const status = over ? (approved ? "Over budget — approved" : "Over budget") : "Within budget";
+        const requested = info.requested_budget ? fmt(info.requested_budget) : "None";
+        const last = info.last_updated ? new Date(info.last_updated) : null;
+        const delta = last ? Math.max(0, Math.floor((Date.now() - last.getTime()) / 1000)) : null;
+        const hms = delta !== null ? new Date(delta * 1000).toISOString().substr(11, 8) : "00:00:00";
+        return [
+            fmt(info.current_bid),
+            fmt(info.max_budget),
+            requested,
+            hms,
+            status,
+            {backgroundColor: color, display: "inline-block", width: "12px", height: "12px", borderRadius: "50%", marginRight: "6px"},
+        ];
+    }
+    """,
+    Output("bidder-current-bid", "children"),
+    Output("bidder-max-budget", "children"),
+    Output("bidder-requested", "children"),
+    Output("bidder-elapsed", "children"),
+    Output("bidder-status-text", "children"),
+    Output("bidder-status-dot", "style"),
+    Input("snapshot-store", "data"),
+    Input("bidder-tract", "value"),
+)
 
 
 @app.callback(
@@ -805,15 +853,15 @@ def handle_bidder_request(n_clicks, tract, amount, unit):
     Output({"type": "approve-button", "tract": MATCH}, "disabled"),
     Output({"type": "approver-input", "tract": MATCH}, "value"),
     Input({"type": "approve-button", "tract": MATCH}, "n_clicks"),
-    Input("approver-interval", "n_intervals"),
+    Input("snapshot-store", "data"),
     State({"type": "approve-button", "tract": MATCH}, "id"),
     State({"type": "approver-input", "tract": MATCH}, "value"),
     State({"type": "approver-unit", "tract": MATCH}, "value"),
     prevent_initial_call=False,
 )
-def update_single_approver(n_clicks, _tick, btn_id, input_value, unit_value):
+def update_single_approver(n_clicks, _snapshot, btn_id, input_value, unit_value):
     tract = btn_id["tract"]
-    snapshot = snapshot_state()
+    snapshot = _snapshot or {}
     info = snapshot.get(tract)
     if not info:
         return "Unknown tract.", "Approve", True, dash.no_update

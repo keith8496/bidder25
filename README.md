@@ -31,6 +31,8 @@ Open http://127.0.0.1:8050 and use the top nav to switch between pages.
 - High Approver: per-tract buttons that enable when the bid exceeds budget; approving locks the button until a new bid arrives.
 - Admin: reset the in-memory sample data.
 
+Early alpha; all rights reserved; not for distribution.
+
 ## State model
 
 - Global shared state is an in-memory Python dictionary (`TRACTS`) protected by a lock. It holds `current_bid`, `max_budget`, `approved_over_budget`, and `last_updated` per tract.
