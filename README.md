@@ -26,18 +26,26 @@ Open http://127.0.0.1:8050 and use the top nav to switch between pages.
 ## What’s in the app
 
 - View Only: read-only dashboard with current bid table, % of budget gauge bars, and bid-by-tract chart.
-- Bid Monitor: choose a tract, enter a new asking price, press Enter to push an update with a confirmation banner.
-- Bidder: choose a tract; see current bid, max budget, elapsed time since last update, and a red/green indicator for over-budget approval.
-- High Approver: per-tract buttons that enable when the bid exceeds budget; approving locks the button until a new bid arrives.
-- Admin: reset the in-memory sample data.
+- Bid Monitor: choose a tract, enter a new asking price (unit scaling with Exact/K/MM), toggle high-bidder, and push updates with Enter.
+- Bidder: choose a tract; see current bid, max budget, requested budget, elapsed time since last update, and a status light for approval.
+- High Approver: per-tract inputs (unit scaling) and approve buttons to raise budgets/approve requests when over budget.
+- Admin: reset the in-memory sample data and edit/add tracts via an editable table.
 
 Early alpha; all rights reserved; not for distribution.
 
 ## State model
 
-- Global shared state is an in-memory Python dictionary (`TRACTS`) protected by a lock. It holds `current_bid`, `max_budget`, `approved_over_budget`, and `last_updated` per tract.
-- Bid updates clear any prior approval; approvals are per-tract and re-required after each new bid.
+- Global shared state is an in-memory Python dictionary (`TRACTS`) protected by a lock. It holds `current_bid`, `max_budget`, `approved_over_budget`, `requested_budget`, `high_bidder`, and `last_updated` per tract.
+- Bid updates clear any prior approval and reset high-bidder; approvals do not set high-bidder (only the monitor toggle controls it).
+- Budget requests are tracked per-tract and cleared on approval or new bid.
 - State is not persisted; restarting the app restores the sample data.
+
+## Architecture notes
+
+- Polling: a single lightweight server callback updates a shared `dcc.Store` every 500 ms; all pages read from this snapshot.
+- Client-side rendering: monitor/bidder labels update via Dash clientside callbacks to avoid rerendering inputs while typing.
+- Server-side state changes: bid updates, high-bidder toggles, approvals, admin edits/resets, and budget requests all go through Python callbacks that lock/update the shared dictionary.
+- No external services: in-memory state only (swap to Redis/DB for durability/concurrency).
 
 ## VS Code launch config
 

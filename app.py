@@ -6,7 +6,7 @@ import threading
 from typing import Dict, Any
 
 import dash
-from dash import Dash, Input, Output, State, ALL, MATCH, dcc, html, dash_table
+from dash import Dash, Input, Output, State, ALL, MATCH, dcc, html, dash_table, clientside_callback
 from dash.dash_table import FormatTemplate
 import plotly.express as px
 import plotly.graph_objects as go
@@ -60,7 +60,7 @@ INITIAL_STATE: Dict[str, Dict[str, Any]] = {
 STATE_LOCK = threading.Lock()
 TRACTS: Dict[str, Dict[str, Any]] = {name: data.copy() for name, data in INITIAL_STATE.items()}
 
-app = Dash(__name__)
+app = Dash(__name__, update_title=None)
 app.title = "Auction Control"
 app.suppress_callback_exceptions = True
 server = app.server
@@ -412,7 +412,6 @@ def monitor_layout(pathname: str):
                     "marginBottom": "8px",
                 },
             ),
-            dcc.Store(id="monitor-focus-store"),
             html.Div(id="monitor-feedback", style={"fontWeight": "bold", "marginBottom": "4px"}),
             html.Div(id="monitor-high-feedback", style={"marginBottom": "12px"}),
         ]
@@ -758,34 +757,15 @@ def handle_monitor_high_toggle(values, tract):
     return f"High bidder status set to {'YES' if is_high else 'NO'} for {tract}."
 
 
-clientside_callback(
-    """
-    function(_value) {
-        const el = document.getElementById("monitor-price");
-        if (el) {
-            el.focus();
-            el.select();
-        }
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output("monitor-focus-store", "data"),
-    Input("monitor-high-toggle", "value"),
-)
-
-clientside_callback(
-    """
-    function(snapshot, tract) {
-        if (!snapshot || !tract || !snapshot[tract]) {
-            return [];
-        }
-        return snapshot[tract].high_bidder ? ["high"] : [];
-    }
-    """,
+@app.callback(
     Output("monitor-high-toggle", "value"),
-    Input("snapshot-store", "data"),
     Input("monitor-tract", "value"),
 )
+def sync_monitor_high(tract):
+    if not tract:
+        return []
+    info = snapshot_state().get(tract)
+    return ["high"] if info and info.get("high_bidder") else []
 
 
 clientside_callback(
