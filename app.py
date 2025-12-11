@@ -10,6 +10,7 @@ from dash import Dash, Input, Output, State, ALL, MATCH, dcc, html, dash_table, 
 from dash.dash_table import FormatTemplate
 import plotly.express as px
 import plotly.graph_objects as go
+from flask_socketio import SocketIO
 
 
 LOG_DIR = Path("logs")
@@ -64,6 +65,8 @@ app = Dash(__name__, update_title=None)
 app.title = "Auction Control"
 app.suppress_callback_exceptions = True
 server = app.server
+# Socket.IO for real-time push of state snapshots (same-origin, no special CORS needed)
+socketio = SocketIO(server)
 
 
 def currency(value: float) -> str:
@@ -91,6 +94,17 @@ def snapshot_state() -> Dict[str, Dict[str, Any]]:
             for tract, data in TRACTS.items()
         }
 
+# Emit the current snapshot to all connected Socket.IO clients.
+def broadcast_snapshot() -> None:
+    """
+    Emit the current snapshot to all connected Socket.IO clients.
+    Called after state mutations complete.
+    """
+    try:
+        socketio.emit("snapshot", snapshot_state(), broadcast=True)
+    except Exception:
+        logger.exception("Error broadcasting snapshot via Socket.IO")
+
 
 def unit_multiplier(unit: str) -> float:
     return {"1": 1.0, "K": 1_000.0, "MM": 1_000_000.0}.get(unit or "1", 1.0)
@@ -107,6 +121,8 @@ def update_bid(tract: str, amount: float) -> None:
         TRACTS[tract]["requested_budget"] = None
         TRACTS[tract]["high_bidder"] = False
         logger.info("Updated %s bid to %.2f", tract, amount)
+    # State changed; broadcast updated snapshot
+    broadcast_snapshot()
 
 
 def approve_over_budget(tract: str, new_budget: float = None) -> None:
@@ -123,6 +139,8 @@ def approve_over_budget(tract: str, new_budget: float = None) -> None:
             )
         else:
             logger.warning("Approval requested for unknown tract %s", tract)
+    # State changed; broadcast updated snapshot
+    broadcast_snapshot()
 
 
 def request_budget_increase(tract: str, amount: float) -> None:
@@ -133,6 +151,8 @@ def request_budget_increase(tract: str, amount: float) -> None:
         TRACTS[tract]["requested_budget"] = amount
         TRACTS[tract]["approved_over_budget"] = False
         logger.info("Requested budget increase for %s to %.2f", tract, amount)
+    # State changed; broadcast updated snapshot
+    broadcast_snapshot()
 
 
 def set_high_bidder(tract: str, is_high: bool) -> None:
@@ -142,6 +162,8 @@ def set_high_bidder(tract: str, is_high: bool) -> None:
             return
         TRACTS[tract]["high_bidder"] = bool(is_high)
         logger.info("Set high bidder status for %s to %s", tract, bool(is_high))
+    # State changed; broadcast updated snapshot
+    broadcast_snapshot()
 
 
 def reset_state() -> None:
@@ -149,6 +171,8 @@ def reset_state() -> None:
         for tract, data in INITIAL_STATE.items():
             TRACTS[tract] = data.copy()
     logger.info("State reset to initial sample values")
+    # State changed; broadcast updated snapshot
+    broadcast_snapshot()
 
 
 def apply_table_updates(rows: Any) -> None:
@@ -173,6 +197,8 @@ def apply_table_updates(rows: Any) -> None:
             TRACTS[name]["approved_over_budget"] = False
             TRACTS[name]["requested_budget"] = None
             logger.info("Admin table update for %s: bid=%.2f, max=%.2f", name, bid, budget)
+    # State changed; broadcast updated snapshot
+    broadcast_snapshot()
 
 
 def add_tract(name: str, current_bid: float, max_budget: float) -> bool:
@@ -191,6 +217,8 @@ def add_tract(name: str, current_bid: float, max_budget: float) -> bool:
             "last_updated": _now(),
         }
         logger.info("Added new tract %s (bid=%.2f, max=%.2f)", name, current_bid, max_budget)
+    # State changed; broadcast updated snapshot
+    broadcast_snapshot()
     return True
 
 
@@ -647,6 +675,49 @@ app.validation_layout = html.Div(
     ]
 )
 
+# Custom index template so we can add Socket.IO client script inline.
+# For now we simply connect and log snapshots; later we can wire these into dcc.Store.
+app.index_string = """
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
+        <script type="text/javascript">
+            document.addEventListener('DOMContentLoaded', function() {
+                try {
+                    var socket = io();
+                    socket.on('connect', function() {
+                        console.log('[Socket.IO] Connected');
+                    });
+                    socket.on('disconnect', function(reason) {
+                        console.log('[Socket.IO] Disconnected:', reason);
+                    });
+                    socket.on('snapshot', function(data) {
+                        console.log('[Socket.IO] Snapshot received', data);
+                        // Stash the most recent snapshot globally for future Dash wiring.
+                        window.latestSnapshot = data;
+                    });
+                } catch (e) {
+                    console.error('Socket.IO init failed', e);
+                }
+            });
+        </script>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+"""
+
 
 @app.callback(Output("page-container", "children"), Input("url", "pathname"))
 def render_page(pathname: str):
@@ -662,12 +733,22 @@ def render_page(pathname: str):
     return view_only_layout(pathname)
 
 
-@app.callback(
+
+# Sync snapshot-store from window.latestSnapshot via clientside callback.
+app.clientside_callback(
+    """
+    function(n, current) {
+        // Use the most recent snapshot pushed over Socket.IO if available.
+        if (typeof window === "undefined" || !window.latestSnapshot) {
+            return current || null;
+        }
+        return window.latestSnapshot;
+    }
+    """,
     Output("snapshot-store", "data"),
     Input("state-interval", "n_intervals"),
+    State("snapshot-store", "data"),
 )
-def update_snapshot_store(_tick):
-    return snapshot_state()
 
 
 @app.callback(
@@ -682,7 +763,7 @@ def refresh_view_only(snapshot):
     return build_summary_table(snapshot), build_budget_progress(snapshot), build_bid_bar(snapshot)
 
 
-clientside_callback(
+app.clientside_callback(
     """
     function(snapshot, tract) {
         if (!snapshot || !tract || !snapshot[tract]) {
@@ -768,7 +849,7 @@ def sync_monitor_high(tract):
     return ["high"] if info and info.get("high_bidder") else []
 
 
-clientside_callback(
+app.clientside_callback(
     """
     function(snapshot, tract) {
         if (!snapshot || !tract || !snapshot[tract]) {
@@ -939,4 +1020,5 @@ def handle_admin_actions(reset_clicks, add_clicks, _ts, name, bid, max_budget, r
 
 if __name__ == "__main__":
     debug = os.getenv("DASH_DEBUG", "1") not in {"0", "false", "False"}
-    app.run_server(debug=debug)
+    # Use Socket.IO's runner so WebSocket transport is enabled.
+    socketio.run(server, debug=debug)
