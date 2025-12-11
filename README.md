@@ -48,6 +48,35 @@ Early alpha; all rights reserved; not for distribution.
 - Server-side state changes: all mutations (bid updates, high‑bidder toggles, budget requests, approvals, resets, and admin edits) acquire a lock and update the shared in‑memory dictionary (`TRACTS`), followed by a Socket.IO broadcast.
 - No external services: state is purely in‑memory; restarting the app restores the sample data. Future versions may swap this for Redis or a database for durability and multi‑process scaling.
 
+## Current Architecture (Dec 2025)
+
+This reflects the current stable baseline of the application as of December 2025.
+
+### State Model
+- All shared state resides in a single in-memory dictionary (`TRACTS`) protected by a global lock.
+- `snapshot_state()` is the authoritative read model; all UI pages derive their data from it.
+- Every state mutation (bid update, high‑bidder toggle, approval, budget request, admin edits, reset) updates `TRACTS` and then triggers a `broadcast_snapshot()` Socket.IO event.
+
+### UI Model
+- Each page includes a `dcc.Store(id="snapshot-store")` that holds the latest snapshot.
+- A lightweight server-side polling callback updates `snapshot-store` every 500 ms.
+- All visual components (tables, charts, labels) render exclusively from `snapshot-store`.
+- Pages use clientside callbacks for responsive UI elements (e.g., bidder/monitor labels) without interfering with text entry.
+
+### Socket.IO Usage
+- Socket.IO is fully wired: the server emits an updated snapshot after every state change.
+- The browser receives snapshots and logs them to `window.latestSnapshot`.
+- **However, the production UI currently relies on server polling only.** Real-time push is staged for a later release.
+
+### Stability & Deployment
+- The app is designed for a single-process dev server and does not persist state.
+- Restarting the app resets to sample tracts.
+- Future enhancements may introduce:
+  - Redis-backed state for multi-process deployment
+  - Fully real-time Socket.IO-driven UI updates
+  - Modularized code (state, layouts, callbacks, server initialization)
+  - Automated tests and CI pipeline
+
 ## VS Code launch config
 
 A ready-to-go debugger configuration is in `.vscode/launch.json` (`Python: Dash app`). Set a breakpoint in `app.py`, press F5, and you can debug with the integrated terminal.

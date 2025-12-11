@@ -735,6 +735,8 @@ def render_page(pathname: str):
 
 
 
+
+
 # Poll the server for the latest snapshot on a fixed interval.
 @app.callback(
     Output("snapshot-store", "data"),
@@ -827,19 +829,28 @@ def handle_monitor_high_toggle(values, tract):
     if not tract:
         return "Select a tract first."
     is_high = "high" in (values or [])
+    # Check current state to avoid redundant updates when the checkbox
+    # is changed programmatically (e.g., due to another client).
+    info = snapshot_state().get(tract)
+    if info is not None and bool(info.get("high_bidder")) == is_high:
+        return f"High bidder status is already {'YES' if is_high else 'NO'} for {tract}."
     set_high_bidder(tract, is_high)
     return f"High bidder status set to {'YES' if is_high else 'NO'} for {tract}."
 
 
 @app.callback(
     Output("monitor-high-toggle", "value"),
+    Input("snapshot-store", "data"),
     Input("monitor-tract", "value"),
 )
-def sync_monitor_high(tract):
+def sync_monitor_high(snapshot, tract):
     if not tract:
         return []
-    info = snapshot_state().get(tract)
-    return ["high"] if info and info.get("high_bidder") else []
+    snapshot = snapshot or {}
+    info = snapshot.get(tract)
+    if not info:
+        return []
+    return ["high"] if info.get("high_bidder") else []
 
 
 app.clientside_callback(
