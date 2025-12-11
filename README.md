@@ -42,10 +42,11 @@ Early alpha; all rights reserved; not for distribution.
 
 ## Architecture notes
 
-- Polling: a single lightweight server callback updates a shared `dcc.Store` every 500 ms; all pages read from this snapshot.
-- Client-side rendering: monitor/bidder labels update via Dash clientside callbacks to avoid rerendering inputs while typing.
-- Server-side state changes: bid updates, high-bidder toggles, approvals, admin edits/resets, and budget requests all go through Python callbacks that lock/update the shared dictionary.
-- No external services: in-memory state only (swap to Redis/DB for durability/concurrency).
+- Server‑side polling: the UI is driven by a single lightweight server callback that updates `snapshot-store` every 500 ms. All pages read from this snapshot for consistent cross‑window state.
+- Socket.IO (foundation only): the server broadcasts updated snapshots after every state mutation (bid update, approval, high‑bidder toggle, admin edits). The client currently initializes a Socket.IO connection, but the UI is still driven by server polling while real‑time push support is developed.
+- Client-side rendering: monitor/bidder labels update via Dash clientside callbacks to avoid disrupting text entry in input fields.
+- Server-side state changes: all mutations (bid updates, high‑bidder toggles, budget requests, approvals, resets, and admin edits) acquire a lock and update the shared in‑memory dictionary (`TRACTS`), followed by a Socket.IO broadcast.
+- No external services: state is purely in‑memory; restarting the app restores the sample data. Future versions may swap this for Redis or a database for durability and multi‑process scaling.
 
 ## VS Code launch config
 
