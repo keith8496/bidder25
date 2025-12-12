@@ -68,7 +68,7 @@ def monitor_layout(pathname: str):
                 [
                     html.Label("Tract"),
                     dcc.Dropdown(
-                        id="monitor-tract",
+                        id={"type": "tract-dropdown", "role": "monitor"},
                         options=state.tract_options(),
                         value=default_tract,
                         clearable=False,
@@ -162,7 +162,7 @@ def bidder_layout(pathname: str):
             html.H2("Bidder"),
             html.P("Choose a tract to see its current asking price and approval status."),
             dcc.Dropdown(
-                id="bidder-tract",
+                id={"type": "tract-dropdown", "role": "bidder"},
                 options=state.tract_options(),
                 value=default_tract,
                 clearable=False,
@@ -236,52 +236,15 @@ def bidder_layout(pathname: str):
 
 
 def approver_layout(pathname: str):
-    snapshot = state.snapshot_state()
     return html.Div(
         [
             navigation(pathname),
             html.H2("High Approver"),
             html.P("Approve bids that exceed their max budget."),
+            dcc.Store(id={"type": "approver-tracts-store", "page": "approver"}, data=[]),
             html.Div(
-                [
-                    html.Div(
-                        [
-                            html.Div(tract, style={"fontWeight": "bold"}),
-                            html.Div(id={"type": "approver-row", "tract": tract}, style={"marginBottom": "6px"}),
-                            html.Div(
-                                [
-                                    dcc.RadioItems(
-                                        id={"type": "approver-unit", "tract": tract},
-                                        options=[
-                                            {"label": "Exact", "value": "1"},
-                                            {"label": "K", "value": "K"},
-                                            {"label": "MM", "value": "MM"},
-                                        ],
-                                        value="K",
-                                        inline=True,
-                                        style={"marginBottom": "6px"},
-                                    ),
-                                    dcc.Input(
-                                        id={"type": "approver-input", "tract": tract},
-                                        type="number",
-                                        step="0.01",
-                                        style={"width": "200px", "marginRight": "8px"},
-                                        placeholder="Requested/new budget",
-                                    ),
-                                ],
-                                style={"display": "flex", "flexDirection": "column", "alignItems": "flex-start", "marginBottom": "6px"},
-                            ),
-                            html.Button(
-                                f"Approve over budget for {tract}",
-                                id={"type": "approve-button", "tract": tract},
-                                n_clicks=0,
-                                style={"padding": "8px 12px", "marginBottom": "12px"},
-                            ),
-                        ],
-                        style={"border": "1px solid #ddd", "borderRadius": "6px", "padding": "10px"},
-                    )
-                    for tract in snapshot.keys()
-                ],
+                id={"type": "approver-cards", "page": "approver"},
+                children=[],
                 style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(240px, 1fr))", "gap": "12px"},
             ),
             html.Div(id="approver-status", style={"marginTop": "12px", "fontWeight": "bold"}),

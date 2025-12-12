@@ -42,7 +42,7 @@ def register_clientside_callbacks(app) -> None:
         Output("monitor-status-dot", "style"),
         Output("monitor-high-text", "children"),
         Input("snapshot-store", "data"),
-        Input("monitor-tract", "value"),
+        Input({"type": "tract-dropdown", "role": "monitor"}, "value"),
     )
 
     app.clientside_callback(
@@ -78,7 +78,7 @@ def register_clientside_callbacks(app) -> None:
         Output("bidder-status-text", "children"),
         Output("bidder-status-dot", "style"),
         Input("snapshot-store", "data"),
-        Input("bidder-tract", "value"),
+        Input({"type": "tract-dropdown", "role": "bidder"}, "value"),
     )
 
     app.clientside_callback(

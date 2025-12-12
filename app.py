@@ -6,7 +6,6 @@ from dash import Dash, dcc, html
 
 import state  # Use module import only
 
-
 # --- Modular imports ---
 from realtime import init_socketio
 from callbacks.server import register_server_callbacks
@@ -42,7 +41,6 @@ logger.warning(
     "do NOT deploy with multiple workers/processes without adding a shared state backend."
 )
 
-
 app = Dash(__name__, update_title=None)
 app.title = "Auction Control"
 app.suppress_callback_exceptions = True
@@ -50,30 +48,36 @@ server = app.server
 # Socket.IO for real-time push of state snapshots (development: allow all origins)
 socketio = init_socketio(server)
 
-
 app.layout = html.Div(
     [
         dcc.Location(id="url"),
         html.H1("Auction Bidding Control Center"),
         dcc.Store(id="snapshot-store", data=state.snapshot_state()),
+        # NOTE: Keep at 500ms for now per project needs.
         dcc.Interval(id="state-interval", interval=500, n_intervals=0),
         html.Div(id="page-container"),
     ],
     style={"maxWidth": "1100px", "margin": "0 auto", "padding": "18px"},
 )
 
-# Validation layout makes Dash aware of dynamic pages/IDs used by callbacks.
-app.validation_layout = html.Div(
-    [
-        app.layout,
-        pages_view_only_layout("/view"),
-        pages_monitor_layout("/monitor"),
-        pages_bidder_layout("/bidder"),
-        pages_approver_layout("/approver"),
-        pages_admin_layout("/admin"),
-        pages_not_found_layout("/404"),
-    ]
-)
+# Validation layout can help Dash validate callback IDs at startup.
+# However, this app supports adding tracts at runtime, and page layouts can be
+# state-dependent. A static validation_layout built at import time can go stale.
+#
+# If you want strict callback validation while developing, enable it via:
+#   DASH_USE_VALIDATION_LAYOUT=1
+if os.getenv("DASH_USE_VALIDATION_LAYOUT", "0") not in {"0", "false", "False"}:
+    app.validation_layout = html.Div(
+        [
+            app.layout,
+            pages_view_only_layout("/view"),
+            pages_monitor_layout("/monitor"),
+            pages_bidder_layout("/bidder"),
+            pages_approver_layout("/approver"),
+            pages_admin_layout("/admin"),
+            pages_not_found_layout("/404"),
+        ]
+    )
 
 # Custom index template so we can add Socket.IO client script inline.
 # For now we simply connect and log snapshots; later we can wire these into dcc.Store.
@@ -118,9 +122,10 @@ app.index_string = """
 </html>
 """
 
-# --- Modular callback wiring (currently scaffolds/no-ops) ---
+# --- Modular callback wiring ---
 register_server_callbacks(app, socketio)
 register_clientside_callbacks(app)
+
 if __name__ == "__main__":
     debug = os.getenv("DASH_DEBUG", "1") not in {"0", "false", "False"}
     # Use Socket.IO's runner so WebSocket transport is enabled.

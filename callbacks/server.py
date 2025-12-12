@@ -56,6 +56,35 @@ def register_server_callbacks(app, socketio) -> None:
             return view_only_layout("/view")
         return not_found_layout(pathname)
 
+    # Keep tract dropdown options/value valid when Admin adds/removes tracts.
+    # Pattern-matching IDs make this callback safe on pages where the dropdowns
+    # are not present (ALL -> zero matches).
+    @app.callback(
+        Output({"type": "tract-dropdown", "role": ALL}, "options"),
+        Output({"type": "tract-dropdown", "role": ALL}, "value"),
+        Input("snapshot-store", "data"),
+        State({"type": "tract-dropdown", "role": ALL}, "value"),
+        State({"type": "tract-dropdown", "role": ALL}, "id"),
+    )
+    def sync_tract_dropdown_options(_snapshot, current_values, dropdown_ids):
+        options = state.tract_options()
+
+        # Extract the set of valid values from the options list.
+        valid_values = [opt.get("value") for opt in (options or []) if isinstance(opt, dict)]
+        default_value = valid_values[0] if valid_values else None
+
+        def ensure_valid(current):
+            if default_value is None:
+                return None
+            return current if current in valid_values else default_value
+
+        n = len(dropdown_ids or [])
+        if n == 0:
+            return [], []
+
+        safe_values = [ensure_valid(v) for v in (current_values or [])]
+        return [options] * n, safe_values
+
     @app.callback(
         Output("snapshot-store", "data"),
         Input("state-interval", "n_intervals"),
@@ -80,12 +109,88 @@ def register_server_callbacks(app, socketio) -> None:
             build_budget_progress(snapshot),
             build_bid_bar(snapshot),
         )
+    
+    @app.callback(
+        Output({"type": "approver-cards", "page": ALL}, "children"),
+        Output({"type": "approver-tracts-store", "page": ALL}, "data"),
+        Input("snapshot-store", "data"),
+        State({"type": "approver-tracts-store", "page": ALL}, "data"),
+        State({"type": "approver-tracts-store", "page": ALL}, "id"),
+    )
+    def render_approver_cards(snapshot, rendered_tracts_list, store_ids):
+        # The Approver page may not be mounted on every route.
+        # Pattern-matching IDs make this callback a safe no-op when absent.
+        n = len(store_ids or [])
+        if n == 0:
+            return [], []
+
+        snapshot = snapshot or {}
+        tracts = sorted(snapshot.keys())
+        rendered_tracts = (rendered_tracts_list or [None])[0] or []
+
+        # If the set/order of tracts hasn't changed, do not rebuild the card tree.
+        # This prevents flashing and preserves input state.
+        if tracts == rendered_tracts:
+            return [dash.no_update] * n, [dash.no_update] * n
+
+        cards = []
+        for tract in tracts:
+            cards.append(
+                html.Div(
+                    [
+                        html.Div(tract, style={"fontWeight": "bold"}),
+                        dcc.Store(
+                            id={"type": "approver-request-store", "tract": tract},
+                            data={"requested_budget": None, "requested_unit": None},
+                        ),
+                        html.Div(id={"type": "approver-row", "tract": tract}, style={"marginBottom": "6px"}),
+                        html.Div(
+                            [
+                                dcc.RadioItems(
+                                    id={"type": "approver-unit", "tract": tract},
+                                    options=[
+                                        {"label": "Exact", "value": "1"},
+                                        {"label": "K", "value": "K"},
+                                        {"label": "MM", "value": "MM"},
+                                    ],
+                                    value="K",
+                                    inline=True,
+                                    style={"marginBottom": "6px"},
+                                ),
+                                dcc.Input(
+                                    id={"type": "approver-input", "tract": tract},
+                                    type="number",
+                                    step="0.01",
+                                    style={"width": "200px", "marginRight": "8px"},
+                                    placeholder="Requested/new budget",
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "flexDirection": "column",
+                                "alignItems": "flex-start",
+                                "marginBottom": "6px",
+                            },
+                        ),
+                        html.Button(
+                            f"Approve over budget for {tract}",
+                            id={"type": "approve-button", "tract": tract},
+                            n_clicks=0,
+                            style={"padding": "8px 12px", "marginBottom": "12px"},
+                        ),
+                    ],
+                    style={"border": "1px solid #ddd", "borderRadius": "6px", "padding": "10px"},
+                )
+            )
+
+        # ALL outputs expect lists aligned to the number of matching components.
+        return [cards], [tracts]
 
     @app.callback(
         Output("monitor-feedback", "children"),
         Output("monitor-price", "value"),
         Input("monitor-price", "n_submit"),
-        State("monitor-tract", "value"),
+        State({"type": "tract-dropdown", "role": "monitor"}, "value"),
         State("monitor-price", "value"),
         State("monitor-unit", "value"),
         prevent_initial_call=True,
@@ -108,14 +213,14 @@ def register_server_callbacks(app, socketio) -> None:
                 f"Updated {tract} to {currency(amount)} at {_now().strftime('%H:%M:%S')}.",
                 style={"color": "seagreen"},
             ),
-            "",
+            None,
         )
 
     @app.callback(
         Output("monitor-high-feedback", "children"),
         Output("monitor-focus-signal", "data"),
         Input("monitor-high-toggle", "value"),
-        State("monitor-tract", "value"),
+        State({"type": "tract-dropdown", "role": "monitor"}, "value"),
         prevent_initial_call=True,
     )
     def handle_monitor_high_toggle(values, tract):
@@ -132,7 +237,7 @@ def register_server_callbacks(app, socketio) -> None:
     @app.callback(
         Output("monitor-high-toggle", "value"),
         Input("snapshot-store", "data"),
-        Input("monitor-tract", "value"),
+        Input({"type": "tract-dropdown", "role": "monitor"}, "value"),
     )
     def sync_monitor_high(snapshot, tract):
         if not tract:
@@ -148,7 +253,7 @@ def register_server_callbacks(app, socketio) -> None:
         Output("bidder-request-feedback", "style"),
         Output("bidder-request-amount", "value"),
         Input("bidder-request-amount", "n_submit"),
-        State("bidder-tract", "value"),
+        State({"type": "tract-dropdown", "role": "bidder"}, "value"),
         State("bidder-request-amount", "value"),
         State("bidder-unit", "value"),
         prevent_initial_call=True,
@@ -162,7 +267,7 @@ def register_server_callbacks(app, socketio) -> None:
             return "Enter a numeric requested budget.", {"color": "crimson"}, dash.no_update
         state.request_budget_increase(tract, req_amount, unit)
         broadcast_snapshot()
-        return f"Requested budget of {currency(req_amount)} for {tract}.", {"color": "seagreen"}, ""
+        return f"Requested budget of {currency(req_amount)} for {tract}.", {"color": "seagreen"}, None
 
     @app.callback(
         Output({"type": "approver-row", "tract": MATCH}, "children"),
@@ -170,30 +275,58 @@ def register_server_callbacks(app, socketio) -> None:
         Output({"type": "approve-button", "tract": MATCH}, "disabled"),
         Output({"type": "approver-input", "tract": MATCH}, "value"),
         Output({"type": "approver-unit", "tract": MATCH}, "value"),
+        Output({"type": "approver-request-store", "tract": MATCH}, "data"),
         Input({"type": "approve-button", "tract": MATCH}, "n_clicks"),
         Input("snapshot-store", "data"),
         State({"type": "approve-button", "tract": MATCH}, "id"),
         State({"type": "approver-input", "tract": MATCH}, "value"),
         State({"type": "approver-unit", "tract": MATCH}, "value"),
+        State({"type": "approver-request-store", "tract": MATCH}, "data"),
         prevent_initial_call=False,
     )
-    def update_single_approver(n_clicks, _snapshot, btn_id, input_value, unit_value):
+    def update_single_approver(n_clicks, _snapshot, btn_id, input_value, unit_value, request_store):
         tract = btn_id["tract"]
         snapshot = _snapshot or {}
         info = snapshot.get(tract)
         if not info:
-            return "Unknown tract.", "Approve", True, dash.no_update, dash.no_update
+            return "Unknown tract.", "Approve", True, dash.no_update, dash.no_update, dash.no_update
+
         ctx = dash.callback_context
-        triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
-        if isinstance(ctx.triggered_id, dict) and ctx.triggered_id.get("tract") == tract and n_clicks:
+
+        # Only approve when the Approve button itself is the triggering input.
+        approve_clicked = (
+            isinstance(ctx.triggered_id, dict)
+            and ctx.triggered_id.get("type") == "approve-button"
+            and ctx.triggered_id.get("tract") == tract
+            and (n_clicks or 0) > 0
+        )
+
+        if approve_clicked:
+            requested_budget = info.get("requested_budget")
+
+            # If the user typed a value, it is interpreted in the selected unit.
+            # If the input is empty/invalid, default to the pending requested budget.
+            typed_budget: Optional[float]
             try:
-                new_budget = float(input_value) if input_value is not None else None
+                if input_value in (None, ""):
+                    typed_budget = None
+                else:
+                    typed_budget = float(input_value)
             except (TypeError, ValueError):
-                new_budget = None
-            if new_budget is not None:
-                new_budget *= state.unit_multiplier(unit_value)
-            if info["current_bid"] > info["max_budget"] or (info.get("requested_budget") and new_budget):
+                typed_budget = None
+
+            if typed_budget is None:
+                new_budget = requested_budget
+            else:
+                new_budget = typed_budget * state.unit_multiplier(unit_value)
+
+            over_budget_now = info["current_bid"] > info["max_budget"]
+            has_request = requested_budget is not None
+
+            # Allow approval if we're currently over budget OR there is a pending request.
+            if over_budget_now or has_request:
                 state.approve_over_budget(tract, new_budget)
+
                 broadcast_snapshot()
                 snapshot = state.snapshot_state()
                 info = snapshot.get(tract)
@@ -210,15 +343,34 @@ def register_server_callbacks(app, socketio) -> None:
             row_text += "Over budget — needs approval"
         else:
             row_text += "Within budget"
-        current_unit = unit_value or "K"
+
         requested_unit = info.get("requested_unit")
+        request_sig = {"requested_budget": requested, "requested_unit": requested_unit}
+        prev_sig = request_store or {"requested_budget": None, "requested_unit": None}
+        request_changed = prev_sig != request_sig
+
+        # Desired display defaults (used only when a new request arrives/changes).
+        current_unit = unit_value or "K"
         effective_unit = requested_unit or current_unit
-        input_val = requested if requested is not None else info["max_budget"]
-        if input_val is not None:
+
+        desired_input_val = requested if requested is not None else info["max_budget"]
+        if desired_input_val is not None:
             factor = state.unit_multiplier(effective_unit)
             if factor:
-                input_val = round(input_val / factor, 2)
-        return row_text, button_label, disabled, input_val, effective_unit
+                desired_input_val = round(desired_input_val / factor, 2)
+
+        # Behavior C: only overwrite the approver input/unit when the requested budget/unit changes
+        # (or after an approval changes/clears the request).
+        if request_changed:
+            out_input_val = desired_input_val
+            out_unit_val = effective_unit
+            out_store = request_sig
+        else:
+            out_input_val = dash.no_update
+            out_unit_val = dash.no_update
+            out_store = prev_sig
+
+        return row_text, button_label, disabled, out_input_val, out_unit_val, out_store
 
     @app.callback(
         Output("approver-status", "children"),
@@ -282,14 +434,14 @@ def register_server_callbacks(app, socketio) -> None:
             for row in rows or []:
                 if not isinstance(row, dict):
                     continue
-                name = row.get("tract")
+                row_name = row.get("tract")
                 try:
                     max_val = float(row.get("max_budget")) if row.get("max_budget") is not None else None
                 except (TypeError, ValueError):
                     continue
                 if max_val is None or max_val <= 0:
-                    if name:
-                        invalid_tracts.append(name)
+                    if row_name:
+                        invalid_tracts.append(row_name)
             if invalid_tracts:
                 msg = "Max budget must be greater than zero for: " + ", ".join(invalid_tracts) + "."
                 return dash.no_update, msg, {"color": "crimson"}
